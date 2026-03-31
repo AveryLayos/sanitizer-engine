@@ -49,7 +49,8 @@ json_message="$(build_message \
   "$INPUT_TOPIC" \
   "$MESSAGE_ORIGIN" \
   "$MESSAGE_SOURCE" \
-  "$MESSAGE_TYPE")"
+  "$MESSAGE_TYPE" \
+  "$JOB_ID")"
 
 publish_message "$INPUT_TOPIC" "$json_message"
 
@@ -67,3 +68,19 @@ echo "Updated job_request.id=${JOB_ID} status to $STATUS_SANITIZING"
 #echo "Deleted job_request.id=${JOB_ID}"
 
 echo ${JOB_ID}
+
+# Consume the last message just published from the topic
+echo "Consuming last message from topic: $INPUT_TOPIC"
+sleep 1
+consumed_message="$(consume_messages "sanitizer_in" 10000 1 || true)"
+
+if [[ -z "${consumed_message:-}" ]]; then
+  echo "No message consumed from topic: $INPUT_TOPIC" >&2
+  exit 1
+fi
+
+echo "Consumed raw message:"
+echo "$consumed_message"
+
+echo "Pretty-printed message:"
+pretty_print_message "$consumed_message"

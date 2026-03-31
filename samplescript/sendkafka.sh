@@ -49,7 +49,7 @@ echo "Published message to topic: $INPUT_TOPIC"
 # Consume the last message just published from the topic
 echo "Consuming last message from topic: $INPUT_TOPIC"
 sleep 1
-#consumed_message="$(consume_messages "$INPUT_TOPIC" 10000 1 || true)"
+consumed_message="$(consume_messages "$INPUT_TOPIC" 10000 1 || true)"
 
 if [[ -z "${consumed_message:-}" ]]; then
   echo "No message consumed from topic: $INPUT_TOPIC" >&2

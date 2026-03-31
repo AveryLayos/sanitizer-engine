@@ -8,6 +8,8 @@ MESSAGE_ORIGIN="${MESSAGE_ORIGIN:-$(hostname)}"
 MESSAGE_SOURCE="${MESSAGE_SOURCE:-manual}"
 MESSAGE_TYPE="${MESSAGE_TYPE:-base64_payload}"
 CONTENT_ENCODING="${CONTENT_ENCODING:-base64}"
+CONSUME_TIMEOUT="${CONSUME_TIMEOUT:-5000}"
+CONSUME_MAX_MESSAGES="${CONSUME_MAX_MESSAGES:-1}"
 
 cleanup() {
   rm -f /dev/shm/tmp_* 2>/dev/null || true
@@ -66,6 +68,7 @@ build_message() {
   local origin="$3"
   local source="$4"
   local msg_type="$5"
+  local job_id="${6:-}"
   local timestamp
   local message_id
   local payload_length
@@ -81,6 +84,7 @@ build_message() {
     --arg origin "$origin" \
     --arg source "$source" \
     --arg type "$msg_type" \
+    --arg job_id "$job_id" \
     --arg encoding "$CONTENT_ENCODING" \
     --arg payload "$payload" \
     --argjson payload_length "$payload_length" \
@@ -92,6 +96,7 @@ build_message() {
         origin: $origin,
         source: $source,
         type: $type,
+        job_id: $job_id,
         encoding: $encoding,
         payload_length: $payload_length
       },
@@ -105,6 +110,7 @@ publish_message() {
 
   printf '%s\n' "$json_message" | kcat -P -b "$KAFKA_BOOTSTRAP_SERVERS" -t "$topic"
 }
+
 # --- Kafka Consumer ---
 consume_messages() {
   local topic="$1"
@@ -115,13 +121,13 @@ consume_messages() {
     -C \
     -b "$KAFKA_BOOTSTRAP_SERVERS" \
     -t "$topic" \
-    -o end \
+    -o -1 \
     -e \
     -q \
     -c "$max_messages" \
-    -r "$timeout" \
     2>/dev/null
 }
+
 # --- Pretty Print a consumed JSON message ---
 pretty_print_message() {
   local raw="$1"
