@@ -11,6 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../libs/db_lib.sh
 source "${SCRIPT_DIR}/libs/db_lib.sh"
 source "${SCRIPT_DIR}/libs/kafka_lib.sh"
+source "${SCRIPT_DIR}/libs/san_lib.sh"
+
 ## the following line are for testing purposes, it should be removed once the test is over
 ## or it should be moved to a separate test script
 # Encode file once
@@ -41,46 +43,27 @@ if [[ -z "${FILE_CONTENT_B64:-}" ]]; then
 fi
 
 echo "job_id=${JOB_ID} file_name=${FILE_NAME} content_type=${CONTENT_TYPE}"
-
+sanitized_msg="$(sanitize_base64 "$FILE_CONTENT_B64" "$JOB_ID" "$CONTENT_TYPE")"
+echo "Sanitized message: $sanitized_msg"
 # Build the message and publish to Kafka Sanitizer Input Topic
 
 json_message="$(build_message \
-  "$FILE_CONTENT_B64" \
+  "$sanitized_msg" \
   "$INPUT_TOPIC" \
   "$MESSAGE_ORIGIN" \
   "$MESSAGE_SOURCE" \
   "$MESSAGE_TYPE" \
-  "$JOB_ID")"
+  "$JOB_ID" \
+  "$CONTENT_TYPE" \
+  "$FILE_NAME")"
 
 publish_message "$INPUT_TOPIC" "$json_message"
 
 echo "Published message to topic: $INPUT_TOPIC"
 # also log the message meta information such as timestamp, origin,  etc.
-echo "Message meta: origin=$MESSAGE_ORIGIN, source=$MESSAGE_SOURCE, type=$MESSAGE_TYPE"
-
-#update_job_request_status "$JOB_ID" "$SANITIZING"
-
-update_job_request_status "$JOB_ID" "$STATUS_SANITIZING"
-echo "Updated job_request.id=${JOB_ID} status to $STATUS_SANITIZING"
-
-
-#delete_job_request_by_id "$JOB_ID"
-#echo "Deleted job_request.id=${JOB_ID}"
-
-echo ${JOB_ID}
-
-# Consume the last message just published from the topic
-echo "Consuming last message from topic: $INPUT_TOPIC"
-sleep 1
-consumed_message="$(consume_messages "sanitizer_in" 10000 1 || true)"
-
-if [[ -z "${consumed_message:-}" ]]; then
-  echo "No message consumed from topic: $INPUT_TOPIC" >&2
-  exit 1
-fi
-
-echo "Consumed raw message:"
-echo "$consumed_message"
-
+echo "Message meta: origin=$MESSAGE_ORIGIN, source=$MESSAGE_SOURCE, type=$CONTENT_TYPE"
 echo "Pretty-printed message:"
-pretty_print_message "$consumed_message"
+pretty_print_message "$json_message"
+
+update_job_request_status "$JOB_ID" "$STATUS_AI_PROCESSING_PENDING"
+echo "Updated job_request.id=${JOB_ID} status to $STATUS_AI_PROCESSING_PENDING"
