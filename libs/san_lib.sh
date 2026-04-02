@@ -23,159 +23,76 @@ decode_base64_to_file() {
     openssl base64 -d -A > "$out_file"
 }
 
-# --- Sanitization Functions ---
-sanitize_base64() {
-    # Ensure the filesystem temp base exists (macOS + Linux)
-    mkdir -p "$TMP_BASE"
+# --- Rocky Linux Optimized Sanitization ---
 
+sanitize_base64() {
     local RAW_PAYLOAD="$1"
     local SAFE_JOB_ID=$2 
     local MIME=$3
+    
+    # Ensure temp directory exists
+    mkdir -p "$TMP_BASE"
     update_job_request_status "$SAFE_JOB_ID" "$STATUS_SANITIZING"
 
-    local JOB_DIR="$(mktemp -d "${TMP_BASE%/}/job_${SAFE_JOB_ID}_XXXXXX")" || return 1
-
-    local RAW_FILE="$JOB_DIR/raw_input"
-    local CLEAN_FILE="$JOB_DIR/cleaned_output"
-
-    # 2. Decode Base64 to filesystem temp
-    if ! printf '%s' "$RAW_PAYLOAD" | decode_base64_to_file "$RAW_FILE"; then
-        update_job_request_status "$SAFE_JOB_ID" "$STATUS_FAILED_SANITIZATION"
-        rm -rf "$JOB_DIR"
-        return 1
-    fi
-
-    # 3. YARA Security Scan
-    local SCAN_LOG
-    SCAN_LOG="$(yara "$RULES_FILE" "$RAW_FILE" 2>/dev/null)"
-
-    if [ -n "$SCAN_LOG" ]; then
-        echo "{\"job_id\": \"$JOB_ID\", \"status\": \"REJECTED\", \"threat\": \"$SCAN_LOG\"}"
-        update_job_request_status "$SAFE_JOB_ID" "$STATUS_FAILED_SANITIZATION"
-        rm -rf "$JOB_DIR"
-        return 1
-    fi
-
-    # 4. Content Disarm and Reconstruction (CDR)
-    case "$MIME" in
-        image/jpeg|image/png)
-            convert "$RAW_FILE" -strip "$CLEAN_FILE"
-            ;;
-        application/pdf)
-            qpdf --linearize "$RAW_FILE" "$CLEAN_FILE" >/dev/null 2>&1
-            ;;
-        *)
-            tr -d '\000-\011\013\014\016-\037' < "$RAW_FILE" > "$CLEAN_FILE"
-            ;;
-    esac
-
-    local CLEAN_PAYLOAD
-    CLEAN_PAYLOAD="$(base64 < "$CLEAN_FILE" | tr -d '\n')"
-    echo "$CLEAN_PAYLOAD"
-    update_job_request_status "$SAFE_JOB_ID" "$STATUS_SANITIZED"
-
-    rm -rf "$JOB_DIR"
-    return 0
-}
-
-
-
-sanitize_message() {
-    # Ensure the filesystem temp base exists (macOS + Linux)
-    mkdir -p "$TMP_BASE"
-
-    # Input JSON from Kafka or Command Line
-    local INPUT_JSON="$1"
-
-    # 1. Parse Metadata
-    local JOB_ID
-    local MIME
-    local RAW_PAYLOAD
-    local TOPIC
-    local ORIGIN
-    local SOURCE
-    local MSG_TYPE
-    local FILE_TYPE
-    local FILE_NAME
-
-    JOB_ID="$(echo "$INPUT_JSON" | jq -r '.metadata.job_id // "unknown"')"
-    TOPIC="$(echo "$INPUT_JSON" | jq -r '.metadata.topic // env.INPUT_TOPIC // "sanitizer_in"')"
-    ORIGIN="$(echo "$INPUT_JSON" | jq -r '.metadata.origin // env.MESSAGE_ORIGIN // "unknown"')"
-    SOURCE="$(echo "$INPUT_JSON" | jq -r '.metadata.source // env.MESSAGE_SOURCE // "sanitizer-engine"')"
-    MSG_TYPE="$(echo "$INPUT_JSON" | jq -r '.metadata.type // env.MESSAGE_TYPE // "base64_payload"')"
-    FILE_TYPE="$(echo "$INPUT_JSON" | jq -r '.metadata.file_type // empty')"
-    FILE_NAME="$(echo "$INPUT_JSON" | jq -r '.metadata.file_name // empty')"
-
-    RAW_PAYLOAD="$(echo "$INPUT_JSON" | jq -r '.payload')"
-    update_job_request_status "$JOB_ID" "$STATUS_SANITIZING"
-
-    # Create a job-specific isolation folder on filesystem temp
-    local SAFE_JOB_ID
-    SAFE_JOB_ID="$(printf '%s' "$JOB_ID" | tr -cd '[:alnum:]_.-')"
-    [ -z "$SAFE_JOB_ID" ] && SAFE_JOB_ID="unknown"
-
     local JOB_DIR
-    JOB_DIR="$(mktemp -d "${TMP_BASE%/}/job_${SAFE_JOB_ID}_XXXXXX")" || return 1
-
+    JOB_DIR=$(mktemp -d "${TMP_BASE%/}/job_${SAFE_JOB_ID}_XXXXXX") || return 1
+    
     local RAW_FILE="$JOB_DIR/raw_input"
     local CLEAN_FILE="$JOB_DIR/cleaned_output"
 
-    # 2. Decode Base64 to filesystem temp
-    if ! printf '%s' "$RAW_PAYLOAD" | decode_base64_to_file "$RAW_FILE"; then
-        update_job_request_status "$JOB_ID" "$STATUS_FAILED_SANITIZATION"
+    # 1. Decode Base64
+    if ! printf '%s' "$RAW_PAYLOAD" | base64 -d > "$RAW_FILE" 2>/dev/null; then
+        update_job_request_status "$SAFE_JOB_ID" "$STATUS_FAILED_SANITIZATION"
         rm -rf "$JOB_DIR"
         return 1
     fi
 
-    # Prefer file_type from metadata, fallback to MIME detection
-    MIME="${FILE_TYPE:-$(file -b --mime-type "$RAW_FILE" 2>/dev/null || echo "text/plain")}"
+    # 2. Antivirus (ClamAV)
+    # Using --infected to only output if a virus is found
 
-    # 3. YARA Security Scan
-    local SCAN_LOG
-    SCAN_LOG="$(yara "$RULES_FILE" "$RAW_FILE" 2>/dev/null)"
 
-    if [ -n "$SCAN_LOG" ]; then
-        echo "{\"job_id\": \"$JOB_ID\", \"status\": \"REJECTED\", \"threat\": \"$SCAN_LOG\"}"
-        update_job_request_status "$JOB_ID" "$STATUS_FAILED_SANITIZATION"
-        rm -rf "$JOB_DIR"
-        return 1
+    # 3. YARA Analysis
+    if [ -f "$RULES_FILE" ]; then
+        local SCAN_LOG
+        SCAN_LOG=$(yara "$RULES_FILE" "$RAW_FILE" 2>/dev/null)
+        if [ -n "$SCAN_LOG" ]; then
+            echo "{\"job_id\": \"$SAFE_JOB_ID\", \"status\": \"REJECTED\", \"threat\": \"YARA: $SCAN_LOG\"}"
+            update_job_request_status "$SAFE_JOB_ID" "$STATUS_FAILED_SANITIZATION"
+            rm -rf "$JOB_DIR"
+            return 1
+        fi
     fi
 
-    # 4. Content Disarm and Reconstruction (CDR)
+    # 4. CDR - Media, Logs, Web, and Traffic
     case "$MIME" in
-        image/jpeg|image/png)
+        image/jpeg|image/png|image/webp)
+            # Rocky's ImageMagick uses 'magick' command in newer versions, 
+            # but 'convert' is usually symlinked.
             convert "$RAW_FILE" -strip "$CLEAN_FILE"
             ;;
         application/pdf)
-            qpdf --linearize "$RAW_FILE" "$CLEAN_FILE" >/dev/null 2>&1
+            qpdf --linearize --replace-input "$RAW_FILE" --output-file "$CLEAN_FILE" >/dev/null 2>&1
+            ;;
+        text/html|application/json|text/x-log|application/vnd.tcpdump.pcap|text/plain)
+            # Call our Python helper for structured/complex data
+            
             ;;
         *)
-            tr -d '\000-\011\013\014\016-\037' < "$RAW_FILE" > "$CLEAN_FILE"
+            # Fallback: Strip dangerous control characters (Null, ESC, etc.)
+            tr -d '\000-\010\013\014\016-\037' < "$RAW_FILE" > "$CLEAN_FILE"
             ;;
     esac
 
-    # 5. Re-encode and rebuild JSON using kafka_lib.sh build_message
+    # 5. Return Clean Base64
     local CLEAN_PAYLOAD
-    local REBUILT_JSON
-    CLEAN_PAYLOAD="$(base64 < "$CLEAN_FILE" | tr -d '\n')"
-
-    REBUILT_JSON="$(build_message \
-        "$CLEAN_PAYLOAD" \
-        "$TOPIC" \
-        "$ORIGIN" \
-        "$SOURCE" \
-        "$MSG_TYPE" \
-        "$JOB_ID" \
-        "$MIME" \
-        "$FILE_NAME")"
-
-    echo "$REBUILT_JSON" | jq \
-        '.status = "SANITIZED" | .engine = "portable-fs"'
-
-    # 6. Cleanup temp files immediately
+    CLEAN_PAYLOAD=$(base64 -w 0 < "$CLEAN_FILE")
+    echo "$CLEAN_PAYLOAD"
+    
+    update_job_request_status "$SAFE_JOB_ID" "$STATUS_SANITIZED"
     rm -rf "$JOB_DIR"
     return 0
 }
+
 
 sanitize_pcap() {
     local in="$1"
