@@ -67,3 +67,62 @@ pretty_print_message "$json_message"
 
 update_job_request_status "$JOB_ID" "$STATUS_AI_PROCESSING_PENDING"
 echo "Updated job_request.id=${JOB_ID} status to $STATUS_AI_PROCESSING_PENDING"
+
+# 1. READ ONLY PENDING (10 points)
+ROW="$(read_latest_pending_job_request)"
+
+if [[ -z "$ROW" ]]; then
+  echo "No PENDING rows found in job_request"
+  exit 0 # Exit gracefully if nothing to do
+fi
+
+IFS=$'\t' read -r JOB_ID FILE_NAME CONTENT_TYPE FILE_CONTENT_B64 <<< "$ROW"
+
+# 2. INITIAL LOG & STATUS UPDATE (20 points logic)
+update_job_request_status "$JOB_ID" "SANITIZING"
+insert_execution_log "$JOB_ID" "$USER_ID" "STARTED" "Starting sanitization for $FILE_NAME"
+
+# 3. CONTENT VALIDATION
+if [[ -z "${FILE_CONTENT_B64:-}" ]]; then
+  MSG="Empty blob content for job_request.id=${JOB_ID}"
+  echo "$MSG" >&2
+  update_job_request_status "$JOB_ID" "$STATUS_COMPLETED_WITH_WARNINGS"
+  insert_execution_log "$JOB_ID" "$USER_ID" "WARNING" "$MSG"
+  exit 1
+fi
+
+# 4. SANITIZATION STEP
+insert_execution_log "$JOB_ID" "$USER_ID" "PROCESSING" "Running sanitization engine..."
+sanitized_msg="$(sanitize_base64 "$FILE_CONTENT_B64" "$JOB_ID" "$CONTENT_TYPE")"
+
+# 5. KAFKA STEP
+insert_execution_log "$JOB_ID" "$USER_ID" "PUBLISHING" "Building and sending JSON to Kafka..."
+json_message="$(build_message "$sanitized_msg" "$INPUT_TOPIC" "$MESSAGE_ORIGIN" "$MESSAGE_SOURCE" "$MESSAGE_TYPE" "$JOB_ID" "$CONTENT_TYPE" "$FILE_NAME")"
+
+if publish_message "$INPUT_TOPIC" "$json_message"; then
+    insert_execution_log "$JOB_ID" "$USER_ID" "SUCCESS" "Published to $INPUT_TOPIC"
+else
+    insert_execution_log "$JOB_ID" "$USER_ID" "FAILED" "Kafka publication failed"
+    exit 1
+fi
+
+# 6. FINAL STATUS (10 points logic)
+update_job_request_status "$JOB_ID" "$STATUS_AI_PROCESSING_PENDING"
+insert_execution_log "$JOB_ID" "$USER_ID" "COMPLETED" "Job handed off to AI Processing"
+
+echo "Process Complete for Job ID: $JOB_ID"
+
+ROW="$(read_latest_job_request)"
+if [[ -z "$ROW" ]]; then
+    echo "CRITICAL: No job found. Cannot log execution."
+    exit 1
+fi
+
+# Split the row
+IFS=$'\t' read -r JOB_ID FILE_NAME CONTENT_TYPE FILE_CONTENT_B64 <<< "$ROW"
+
+# Ensure JOB_ID is a number before proceeding
+if ! [[ "$JOB_ID" =~ ^[0-9]+$ ]]; then
+    echo "CRITICAL: Invalid Job ID: $JOB_ID"
+    exit 1
+fi
